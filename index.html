@@ -100,7 +100,8 @@ tbody td:first-child{text-align:left;color:var(--muted);}
 <header>
   <div class="logo-icon">GD</div>
   <div><div class="logo-title">GGAL <span>Options</span></div><div class="logo-sub">Simuladores de Estrategias</div></div>
-  <div class="live-badge">SIMULACIÓN</div>
+  <div id="hist-badge" style="margin-left:auto;background:#333;color:#808090;font-size:10px;font-weight:700;padding:3px 10px;border-radius:3px;letter-spacing:0.3px;transition:all 0.3s;">⏳ Cargando datos reales...</div>
+  <div class="live-badge" style="margin-left:8px;">SIMULACIÓN</div>
 </header>
 
 <div class="nav-bar">
@@ -480,30 +481,51 @@ function runWheel(){
 
   // Calcular ciclos reales a partir de hoy
   const startDate = new Date();
-  const ciclosBase = getCiclos(startDate, years);
+  const ciclosBase = getCiclosHibridos(startDate, years);
 
   setTimeout(()=>{
     wResults=[];
 
     for(let sim=0;sim<nSim;sim++){
       let S = S0;
-      let cash = 0;           // cash acumulado (primas + ventas - compras)
-      let acumCau = 0;        // saldo en caución
+      let cash = 0;
+      let acumCau = 0;
       let intCaucion = 0;
       let primaTotalCobrada = 0;
-      let pnlAcciones = 0;    // ganancia/pérdida por movimiento del papel
+      let pnlAcciones = 0;
       let tieneAcciones = false;
-      let costoBaaseAcciones = 0; // precio al que se adquirieron
+      let costoBaaseAcciones = 0;
       let ciclosAsignado = 0;
+      let ciclosReales = 0;
       const ciclos_data = [];
-      const equityCurve = [0]; // P&L acumulado por ciclo
+      const equityCurve = [0];
 
       for(const ciclo of ciclosBase){
         const dias = ciclo.dias;
         const T = dias / 252;
-        // Simular precio al final del ciclo
-        let Sfin = S;
-        for(let d=0;d<dias;d++) Sfin = Sfin * Math.exp(-.5*vi*vi*(1/252)+vi*Math.sqrt(1/252)*randn());
+
+        // Usar path real si está disponible, GBM si no
+        let Sfin;
+        let esReal = false;
+        if(ciclo.esHistorico && histLoaded) {
+          const pathR = getPathReal(ciclo.desde, ciclo.hasta);
+          if(pathR && pathR.length >= 2) {
+            Sfin = pathR[pathR.length-1];
+            S = pathR[0]; // usar precio real de inicio del ciclo
+            esReal = true;
+            ciclosReales++;
+          } else {
+            for(let d=0;d<dias;d++) S = S * Math.exp(-.5*vi*vi*(1/252)+vi*Math.sqrt(1/252)*randn());
+            Sfin = S;
+          }
+        } else {
+          let Stmp = S;
+          for(let d=0;d<dias;d++) Stmp = Stmp * Math.exp(-.5*vi*vi*(1/252)+vi*Math.sqrt(1/252)*randn());
+          Sfin = Stmp;
+        }
+
+        // VI real del período si disponible
+        const viReal = ciclo.esHistorico ? (getVIReal(ciclo.desde, ciclo.hasta, 'C') || vi) : vi;
 
         let pnlCiclo = 0;
         let fase, strike, prima, ejercido;
@@ -511,8 +533,8 @@ function runWheel(){
         if(!tieneAcciones){
           // ── FASE 1: Naked Put ──
           fase = 'Naked Put';
-          strike = strikeForDelta(S, T, r, vi, dPut, 'P');
-          prima = bsPut(S, strike, T, r, vi) * optSize;
+          strike = strikeForDelta(S, T, r, viReal, dPut, 'P');
+          prima = bsPut(S, strike, T, r, viReal) * optSize;
           primaTotalCobrada += prima;
           acumCau += prima;
 
@@ -530,8 +552,8 @@ function runWheel(){
         } else {
           // ── FASE 2: Covered Call ──
           fase = 'Covered Call';
-          strike = strikeForDelta(S, T, r, vi, dCall, 'C');
-          prima = bsCall(S, strike, T, r, vi) * optSize;
+          strike = strikeForDelta(S, T, r, viReal, dCall, 'C');
+          prima = bsCall(S, strike, T, r, viReal) * optSize;
           primaTotalCobrada += prima;
           acumCau += prima;
 
@@ -571,19 +593,18 @@ function runWheel(){
           spotIni: S0===S?S0:ciclos_data.length>0?parseFloat(ciclos_data[ciclos_data.length-1].spotFin):S0,
           spotFin: Sfin.toFixed(0),
           prima: prima.toFixed(0),
-          ejercido,
+          ejercido, esReal,
           pnlCiclo: Math.round(pnlCiclo),
           acum: Math.round(totalAcum)
         });
       }
 
-      // P&L final — si quedamos con acciones, marcamos a mercado
       const valorAccionesResidual = tieneAcciones ? (S - costoBaaseAcciones)*optSize : 0;
       const pnlTotal = primaTotalCobrada + intCaucion + pnlAcciones + valorAccionesResidual;
 
       wResults.push({
         pnlTotal, primaTotalCobrada, intCaucion, pnlAcciones,
-        ciclosAsignado, totalCiclos: ciclosBase.length,
+        ciclosAsignado, ciclosReales, totalCiclos: ciclosBase.length,
         equityCurve, ciclos_data,
         Sfinal: S, ganadora: pnlTotal > 0
       });
@@ -662,9 +683,12 @@ function selectWPath(idx,btn){
     const ejercBadge = c.ejercido
       ? `<span style="color:#ef4444;font-size:9px;">✓ ASIGN</span>`
       : `<span style="color:#606070;font-size:9px;">—</span>`;
+    const realBadge = c.esReal
+      ? `<span style="font-size:9px;color:#a0c4ff;margin-left:3px;">REAL</span>`
+      : `<span style="font-size:9px;color:#404050;margin-left:3px;">SIM</span>`;
     return `<tr>
       <td>C${c.n} ${c.fecha}</td>
-      <td><span style="color:${faseCol};font-weight:700;font-size:10px;">${c.fase}</span> ${ejercBadge}</td>
+      <td><span style="color:${faseCol};font-weight:700;font-size:10px;">${c.fase}</span> ${ejercBadge} ${realBadge}</td>
       <td>$${parseFloat(c.spotIni).toFixed(0)}</td>
       <td>$${c.spotFin}</td>
       <td style="color:#a0c4ff;">$${c.strike}</td>
@@ -706,7 +730,7 @@ function runJade(){
   document.getElementById('j-loading').style.display='block';
 
   const startDate = new Date();
-  const ciclosBase = getCiclos(startDate, years);
+  const ciclosBase = getCiclosHibridos(startDate, years);
 
   setTimeout(()=>{
     jResults=[];
@@ -723,26 +747,44 @@ function runJade(){
         const dias=ciclo.dias;
         const T=dias/252;
 
-        // Simular path diario para detectar toque de BE
-        const path=gbmPath(S, Math.max(viPut,viCall), dias);
-        const Sfin=path[dias];
+        // Path real o sintético
+        let pathCiclo, Sfin, esReal=false;
+        if(ciclo.esHistorico && histLoaded){
+          const pathR = getPathReal(ciclo.desde, ciclo.hasta);
+          if(pathR && pathR.length >= 2){
+            pathCiclo = pathR;
+            S = pathR[0];
+            Sfin = pathR[pathR.length-1];
+            esReal = true;
+          } else {
+            pathCiclo = gbmPath(S, Math.max(viPut,viCall), dias);
+            Sfin = pathCiclo[pathCiclo.length-1];
+          }
+        } else {
+          pathCiclo = gbmPath(S, Math.max(viPut,viCall), dias);
+          Sfin = pathCiclo[pathCiclo.length-1];
+        }
+
+        // VI real del período
+        const viPutReal  = ciclo.esHistorico ? (getVIReal(ciclo.desde, ciclo.hasta, 'P') || viPut)  : viPut;
+        const viCallReal = ciclo.esHistorico ? (getVIReal(ciclo.desde, ciclo.hasta, 'C') || viCall) : viCall;
 
         // ── Condiciones de entrada ──
         // 1. VI put > VI call (skew correcto)
         // 2. Crédito total > ancho del call spread
-        const kPut  = strikeForDelta(S, T, r, viPut,  dPut,  'P');
-        const kCallV= strikeForDelta(S, T, r, viCall, dCall, 'C');
-        const kCallC= kCallV + ancho; // call comprada 200pts arriba, siempre OTM
+        const kPut  = strikeForDelta(S, T, r, viPutReal,  dPut,  'P');
+        const kCallV= strikeForDelta(S, T, r, viCallReal, dCall, 'C');
+        const kCallC= kCallV + ancho;
 
-        const primaPut  = bsPut(S,  kPut,   T, r, viPut)  * optSize;
-        const primaCallV= bsCall(S, kCallV, T, r, viCall) * optSize;
-        const primaCallC= bsCall(S, kCallC, T, r, viCall) * optSize;
+        const primaPut  = bsPut(S,  kPut,   T, r, viPutReal)  * optSize;
+        const primaCallV= bsCall(S, kCallV, T, r, viCallReal) * optSize;
+        const primaCallC= bsCall(S, kCallC, T, r, viCallReal) * optSize;
         const creditoSpread = primaCallV - primaCallC;
         const creditoTotal  = primaPut + creditoSpread;
 
-        const condSkew    = viPut > viCall;
-        const condCredito = creditoTotal > ancho * optSize; // crédito > ancho en pesos
-        const condCallOTM = kCallV > S; // call vendida tiene que ser OTM
+        const condSkew    = viPutReal > viCallReal;
+        const condCredito = creditoTotal > ancho * optSize;
+        const condCallOTM = kCallV > S;
 
         let pnlCiclo=0, estado='', beDown=0, roled=false;
 
@@ -768,8 +810,8 @@ function runJade(){
           // Detectar si spot toca el BE bajista durante el ciclo
           let tocoBE = false;
           let sBE = S;
-          for(let d=1;d<path.length;d++){
-            if(path[d] <= beDown){ tocoBE=true; sBE=path[d]; break; }
+          for(let d=1;d<pathCiclo.length;d++){
+            if(pathCiclo[d] <= beDown){ tocoBE=true; sBE=pathCiclo[d]; break; }
           }
 
           if(tocoBE){
@@ -779,11 +821,11 @@ function runJade(){
               pnlCiclo = 0 + intCiclo;
             } else {
               // Rolo el put: recompramos kPut y vendemos kPut-200 con T restante
-              const diaTouch = path.findIndex((p,i)=>i>0&&p<=beDown);
+              const diaTouch = pathCiclo.findIndex((p,i)=>i>0&&p<=beDown);
               const T_rem = Math.max((dias - diaTouch)/252, 0.01);
-              const costoRecompra = bsPut(sBE, kPut, T_rem, r, viPut) * optSize;
+              const costoRecompra = bsPut(sBE, kPut, T_rem, r, viPutReal) * optSize;
               const kPut2 = kPut - 200;
-              const primaRol = bsPut(sBE, kPut2, T_rem, r, viPut) * optSize;
+              const primaRol = bsPut(sBE, kPut2, T_rem, r, viPutReal) * optSize;
               const creditoRol = primaRol - costoRecompra; // puede ser negativo
               primaTotalCobrada += creditoRol;
               roleos++;
@@ -813,11 +855,12 @@ function runJade(){
         S = Sfin;
         const acum = primaTotalCobrada - perdidaPut + intCaucion;
         equityCurve.push(acum);
+        S = Sfin;
 
         ciclos_data.push({
           n: ciclos_data.length+1,
           fecha: ciclo.hasta.toLocaleDateString('es-AR',{month:'short',year:'2-digit'}),
-          estado,
+          estado, esReal,
           spot: S.toFixed(0),
           kPut: condSkew&&condCredito&&condCallOTM ? kPut.toFixed(0):'—',
           kCallV: condSkew&&condCredito&&condCallOTM ? kCallV.toFixed(0):'—',
@@ -912,9 +955,12 @@ function selectJPath(idx,btn){
   // Tabla ciclos
   document.getElementById('j-cycle-body').innerHTML=sim.ciclos_data.map(c=>{
     const stCol = c.estado==='CAU'?'#a0c4ff': c.estado==='JL'?'#a3e635': '#f59e0b';
+    const realBadge = c.esReal
+      ? `<span style="font-size:9px;color:#a0c4ff;margin-left:3px;">REAL</span>`
+      : `<span style="font-size:9px;color:#404050;margin-left:3px;">SIM</span>`;
     return `<tr>
       <td>C${c.n} ${c.fecha}</td>
-      <td><span style="color:${stCol};font-weight:700;font-size:10px;">${c.estado}</span></td>
+      <td><span style="color:${stCol};font-weight:700;font-size:10px;">${c.estado}</span> ${realBadge}</td>
       <td>$${c.spot}</td>
       <td style="color:#ef4444;">${c.kPut!=='—'?'$'+c.kPut:'—'}</td>
       <td style="color:#22c55e;">${c.kCallV!=='—'?'$'+c.kCallV:'—'}</td>
@@ -939,7 +985,140 @@ function selectJPath(idx,btn){
 }
 
 
-window.onload=()=>{ runStrangle(); };
+// ── DATOS HISTÓRICOS REALES ──────────────────────────────────────────────────
+const HIST_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT3WNyHxyaxw15sycBbuKe1REh28RHytoNGw9y4No3-CbbtrvZUPpLJG7IU_D0ZYe5qrFzDU5RFAEhu/pub?gid=52171163&single=true&output=csv';
+
+let histData = []; // [{fecha, cierre, viCall, viPut, tlr, diasVto}]
+let histLoaded = false;
+
+function parseDate(s) {
+  // dd/mm/yyyy
+  const p = s.trim().split('/');
+  if(p.length !== 3) return null;
+  return new Date(+p[2], +p[1]-1, +p[0]);
+}
+
+function parsePct(s) {
+  if(!s) return null;
+  return parseFloat(s.replace('%','').replace(',','.').trim()) / 100;
+}
+
+function parseNum(s) {
+  if(!s) return null;
+  return parseFloat(s.replace(/\./g,'').replace(',','.').trim());
+}
+
+async function fetchHistorico() {
+  const badge = document.getElementById('hist-badge');
+  try {
+    badge.textContent = '⏳ Cargando datos reales...';
+    badge.style.background = '#f59e0b';
+    const res = await fetch(HIST_URL + '&t=' + Date.now());
+    const text = await res.text();
+    const rows = text.split('\n').map(r => r.split(','));
+    const HEADER_COLS = ['FECHA','ESPECIE','ÚLTIMO','ULTIMO'];
+    histData = [];
+    for(const row of rows) {
+      if(!row[0]) continue;
+      // Skipear filas de header repetidas
+      if(HEADER_COLS.some(h => row[0].toUpperCase().includes(h))) continue;
+      const fecha = parseDate(row[0]);
+      if(!fecha) continue;
+      const cierre  = parseNum(row[2]);
+      const viCall  = parsePct(row[12]);
+      const viPut   = parsePct(row[13]);
+      const tlr     = parsePct(row[14]);
+      const diasVto = parseInt(row[15]) || null;
+      if(!cierre || cierre <= 0) continue;
+      histData.push({ fecha, cierre, viCall, viPut, tlr, diasVto });
+    }
+    // Ordenar por fecha ascendente
+    histData.sort((a,b) => a.fecha - b.fecha);
+    histLoaded = histData.length > 0;
+    if(histLoaded) {
+      const desde = histData[0].fecha.toLocaleDateString('es-AR');
+      const hasta = histData[histData.length-1].fecha.toLocaleDateString('es-AR');
+      badge.textContent = `✓ ${histData.length} días reales (${desde} → ${hasta})`;
+      badge.style.background = '#166534';
+      badge.style.color = '#22c55e';
+      // Actualizar spot con último precio real
+      const last = histData[histData.length-1];
+      ['s-spot0','w-spot0','j-spot0'].forEach(id => {
+        const el = document.getElementById(id);
+        if(el) el.value = Math.round(last.cierre);
+      });
+      // VI promedio histórica
+      const viCallProm = histData.filter(d=>d.viCall).reduce((s,d)=>s+d.viCall,0) / histData.filter(d=>d.viCall).length;
+      const viPutProm  = histData.filter(d=>d.viPut).reduce((s,d)=>s+d.viPut,0)  / histData.filter(d=>d.viPut).length;
+      document.getElementById('s-vi').value    = (viCallProm*100).toFixed(0);
+      document.getElementById('w-vi').value    = (viCallProm*100).toFixed(0);
+      document.getElementById('j-viput').value  = (viPutProm*100).toFixed(0);
+      document.getElementById('j-vicall').value = (viCallProm*100).toFixed(0);
+    } else {
+      badge.textContent = '⚠ Sin datos reales — usando GBM sintético';
+      badge.style.background = '#7f1d1d';
+    }
+  } catch(e) {
+    badge.textContent = '⚠ Error al cargar — usando GBM sintético';
+    badge.style.background = '#7f1d1d';
+    console.warn('fetchHistorico error:', e);
+  }
+}
+
+// Obtener precio real de GGAL para una fecha dada (o el más cercano)
+function getPrecioReal(fecha) {
+  if(!histLoaded || !histData.length) return null;
+  // Buscar el día más cercano anterior o igual
+  let best = null;
+  for(const d of histData) {
+    if(d.fecha <= fecha) best = d;
+    else break;
+  }
+  return best;
+}
+
+// Obtener path histórico real entre dos fechas
+function getPathReal(desde, hasta) {
+  if(!histLoaded) return null;
+  return histData.filter(d => d.fecha >= desde && d.fecha <= hasta).map(d => d.cierre);
+}
+
+// VI promedio del período histórico
+function getVIReal(desde, hasta, tipo) {
+  if(!histLoaded) return null;
+  const period = histData.filter(d => d.fecha >= desde && d.fecha <= hasta);
+  if(!period.length) return null;
+  const vals = period.map(d => tipo==='P' ? d.viPut : d.viCall).filter(v => v && v > 0);
+  if(!vals.length) return null;
+  return vals.reduce((s,v)=>s+v,0) / vals.length;
+}
+
+// Generar path híbrido: real si hay datos, GBM calibrado si no
+function getPathHibrido(S0, vi, desde, hasta) {
+  const pathReal = getPathReal(desde, hasta);
+  if(pathReal && pathReal.length >= 2) {
+    return { path: pathReal, esReal: true };
+  }
+  // GBM sintético calibrado con VI del período
+  const dias = Math.round((hasta - desde) / (1000*60*60*24));
+  return { path: gbmPath(S0, vi, Math.max(dias,5)), esReal: false };
+}
+
+// ── MODIFICAR runWheel y runJade para usar datos reales ──────────────────────
+// Override getCiclos para marcar cuáles son históricos
+function getCiclosHibridos(startDate, years) {
+  const ciclos = getCiclos(startDate, years);
+  const hoy = new Date();
+  return ciclos.map(c => ({
+    ...c,
+    esHistorico: c.hasta <= hoy && histLoaded
+  }));
+}
+
+window.onload = async () => {
+  await fetchHistorico();
+  runStrangle();
+};
 </script>
 </body>
 </html>
